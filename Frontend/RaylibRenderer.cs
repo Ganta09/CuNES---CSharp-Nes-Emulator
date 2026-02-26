@@ -11,9 +11,10 @@ namespace cunes.Frontend;
 public sealed class RaylibRenderer : IRenderer
 {
     private const int AudioSampleRate = 44_100;
-    private const int AudioChunkSize = 1024;
-    private const int MaxQueuedAudioSamples = AudioChunkSize * 12;
-    private const int AudioPrimeSamples = AudioChunkSize * 3;
+    private const int AudioChunkSize = 512;
+    private const int MaxQueuedAudioSamples = AudioChunkSize * 6;
+    private const int AudioPrimeSamples = AudioChunkSize * 2;
+    private const int TargetQueuedAudioSamples = AudioChunkSize * 3;
 
     private readonly Texture2D _texture;
     private readonly Rectangle _sourceRect;
@@ -165,6 +166,13 @@ public sealed class RaylibRenderer : IRenderer
         if (_audioQueue.Count > _debugQueuePeak)
         {
             _debugQueuePeak = _audioQueue.Count;
+        }
+
+        // Keep latency low by trimming backlog beyond the target queue size.
+        while (_audioQueue.Count > TargetQueuedAudioSamples)
+        {
+            _audioQueue.Dequeue();
+            _debugDroppedSamples++;
         }
 
         PumpAudio();
