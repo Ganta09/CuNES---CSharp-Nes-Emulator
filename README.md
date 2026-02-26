@@ -16,9 +16,20 @@ Download the latest Windows release from [here](https://github.com/Ganta09/CuNES
 ## Current Features
 
 - CPU/PPU/APU emulation core in C#
+- Unofficial 6502 opcodes support (NMOS/NES behavior)
 - ROM loading at startup (`--rom`) or in-game via menu
 - In-game context menu (right click while playing)
 - Runtime key remapping from the UI (`Key Binds`)
+
+## AccuracyCoin Progress
+
+Current result on [AccuracyCoin](https://github.com/100thCoin/AccuracyCoin): **85 / 136**.
+
+Skipped $2004 Stress Test, doesn't work at all. Will try to improve.
+
+<p align="center">
+  <img src="docs/images/test_v1.1.png" alt="AccuracyCoin test results" width="65%" />
+</p>
 
 ## Controls
 
@@ -54,7 +65,6 @@ dotnet run --project CuNES.csproj -- --rom path/to/game.nes
 
 ## Not Done Yet / Known Issues
 
-- Unofficial 6502 opcodes are not fully implemented yet.
 - Noise channel behavior is still a bit funky and needs tuning.
 - Accuracy still needs more validation against hardware behavior and test ROM suites.
 
@@ -62,6 +72,7 @@ dotnet run --project CuNES.csproj -- --rom path/to/game.nes
 
 - Savestates
 - Resize Window
+- Support Player 2
 
 ## Screenshots / Images
 
@@ -76,3 +87,4 @@ Special thanks to these references:
 
 - NESDEV Wiki: https://www.nesdev.org/wiki/Nesdev_Wiki
 - 6502 Opcodes: https://www.masswerk.at/6502/6502_instruction_set.html
+- AccuracyCoin test suite by 100thCoin: https://github.com/100thCoin/AccuracyCoin

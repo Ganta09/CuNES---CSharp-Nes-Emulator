@@ -25,6 +25,7 @@ public sealed class RaylibRenderer : IRenderer
     private readonly bool _audioDebugEnabled;
     private readonly Stopwatch _audioDebugStopwatch = new();
     private readonly Queue<UiAction> _uiActions = new();
+    private string _windowTitle = string.Empty;
 
     private bool _disposed;
     private bool _audioPrimed;
@@ -68,7 +69,9 @@ public sealed class RaylibRenderer : IRenderer
 
         Raylib.SetConfigFlags(ConfigFlags.VSyncHint);
         Raylib.InitWindow(width, height, title);
-        Raylib.SetTargetFPS(targetFps);
+        // Avoid double throttling (VSync + software FPS limiter), which can add micro-stutter.
+        Raylib.SetTargetFPS(0);
+        _windowTitle = title;
 
         var image = Raylib.GenImageColor(Ppu2C02.ScreenWidth, Ppu2C02.ScreenHeight, Color.Black);
         _texture = Raylib.LoadTextureFromImage(image);
@@ -166,6 +169,22 @@ public sealed class RaylibRenderer : IRenderer
 
         PumpAudio();
         MaybeLogAudioDebug();
+    }
+
+    public void SetWindowTitle(string title)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (string.Equals(_windowTitle, title, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _windowTitle = title;
+        Raylib.SetWindowTitle(title);
     }
 
     public byte GetControllerState(int player)

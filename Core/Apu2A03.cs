@@ -25,6 +25,8 @@ public sealed class Apu2A03
     private bool _frameIrqInhibit;
     private bool _frameIrqPending;
     private bool _apuCycleOdd;
+    private bool _lastApuCycleWasPut;
+    private bool _frameIrqClearPendingOnPutToGet;
     private double _sampleAccumulator;
     private float _hpPrevInput;
     private float _hpPrevOutput;
@@ -46,6 +48,7 @@ public sealed class Apu2A03
     private double _mixDebugDmcOutSum;
     private double _mixDebugPreFilterSum;
     private double _mixDebugPostFilterSum;
+    private int _pendingCpuStallCycles;
 
     public void Reset()
     {
@@ -60,6 +63,8 @@ public sealed class Apu2A03
         _frameIrqInhibit = false;
         _frameIrqPending = false;
         _apuCycleOdd = false;
+        _lastApuCycleWasPut = false;
+        _frameIrqClearPendingOnPutToGet = false;
         _sampleAccumulator = 0;
         _hpPrevInput = 0f;
         _hpPrevOutput = 0f;
@@ -80,6 +85,7 @@ public sealed class Apu2A03
         _mixDebugDmcOutSum = 0.0;
         _mixDebugPreFilterSum = 0.0;
         _mixDebugPostFilterSum = 0.0;
+        _pendingCpuStallCycles = 0;
     }
 
     public void ConnectCpuReader(Func<ushort, byte> cpuRead)
@@ -91,6 +97,13 @@ public sealed class Apu2A03
     {
         _triangle.ClockTimer();
         var apuCycle = _apuCycleOdd;
+        var isPutToGetTransition = _lastApuCycleWasPut && !apuCycle;
+        if (_frameIrqClearPendingOnPutToGet && isPutToGetTransition)
+        {
+            _frameIrqPending = false;
+            _frameIrqClearPendingOnPutToGet = false;
+        }
+
         _frameCounterCycles++;
 
         if (apuCycle)
@@ -140,6 +153,8 @@ public sealed class Apu2A03
         }
 
         _dmc.ClockCpu(_cpuRead);
+        _pendingCpuStallCycles += _dmc.ConsumeStallCyclesRequested();
+        _lastApuCycleWasPut = apuCycle;
         _apuCycleOdd = !_apuCycleOdd;
 
         _sampleAccumulator += SampleRate;
@@ -150,6 +165,17 @@ public sealed class Apu2A03
 
         _sampleAccumulator -= CpuFrequency;
         EnqueueSample(MixOutput());
+    }
+
+    public bool ConsumeCpuStallCycle()
+    {
+        if (_pendingCpuStallCycles <= 0)
+        {
+            return false;
+        }
+
+        _pendingCpuStallCycles--;
+        return true;
     }
 
     public bool ConsumeIrq()
@@ -169,7 +195,8 @@ public sealed class Apu2A03
         if (_dmc.IsIrqPending) status |= 1 << 7;
 
         _frameIrqPending = false;
-        return (byte)((openBus & 0x80) | status);
+        // On $4015 reads, only bit 5 reflects CPU open bus; status bits are driven by APU.
+        return (byte)((openBus & 0x20) | status);
     }
 
     public void WriteRegister(ushort address, byte value)
@@ -211,7 +238,7 @@ public sealed class Apu2A03
                 _frameIrqInhibit = (value & 0x40) != 0;
                 if (_frameIrqInhibit)
                 {
-                    _frameIrqPending = false;
+                    _frameIrqClearPendingOnPutToGet = true;
                 }
                 _frameCounterCycles = 0;
                 if (_fiveStepMode)
@@ -477,14 +504,14 @@ var postFilter = Math.Clamp(_lpOutput, -1.0f, 1.0f);
             _enabled = false;
         }
 
-       public void WriteControl(byte value)
-{
-    _duty = (byte)((value >> 6) & 0x03);
-    _lengthHalt = (value & 0x20) != 0;
-    _constantVolume = (value & 0x10) != 0;
-    _envelopePeriod = (byte)(value & 0x0F);
-    // PAS de _envelopeStart = true ici
-}
+        public void WriteControl(byte value)
+        {
+            _duty = (byte)((value >> 6) & 0x03);
+            _lengthHalt = (value & 0x20) != 0;
+            _constantVolume = (value & 0x10) != 0;
+            _envelopePeriod = (byte)(value & 0x0F);
+            _envelopeStart = true;
+        }
 
         public void WriteSweep(byte value)
         {
@@ -808,7 +835,7 @@ var postFilter = Math.Clamp(_lpOutput, -1.0f, 1.0f);
             _lengthHalt = (value & 0x20) != 0;
             _constantVolume = (value & 0x10) != 0;
             _envelopePeriod = (byte)(value & 0x0F);
-          //  _envelopeStart = true;
+            _envelopeStart = true;
         }
 
         public void WritePeriod(byte value)
@@ -968,6 +995,7 @@ var postFilter = Math.Clamp(_lpOutput, -1.0f, 1.0f);
         private bool _sampleBufferEmpty = true;
         private bool _silence = true;
         private bool _irqPending;
+        private int _stallCyclesRequested;
 
         public bool IsActive => _bytesRemaining > 0;
         public bool IsIrqPending => _irqPending;
@@ -1005,6 +1033,7 @@ var postFilter = Math.Clamp(_lpOutput, -1.0f, 1.0f);
             _sampleBufferEmpty = true;
             _silence = true;
             _irqPending = false;
+            _stallCyclesRequested = 0;
         }
 
         public void WriteControl(byte value)
@@ -1109,6 +1138,7 @@ var postFilter = Math.Clamp(_lpOutput, -1.0f, 1.0f);
             {
                 _sampleBuffer = cpuRead(_currentAddress);
                 _sampleBufferEmpty = false;
+                _stallCyclesRequested += 4;
 
                 _currentAddress = _currentAddress == 0xFFFF
                     ? (ushort)0x8000
@@ -1127,6 +1157,13 @@ var postFilter = Math.Clamp(_lpOutput, -1.0f, 1.0f);
                     }
                 }
             }
+        }
+
+        public int ConsumeStallCyclesRequested()
+        {
+            var pending = _stallCyclesRequested;
+            _stallCyclesRequested = 0;
+            return pending;
         }
 
         private void RestartSample()

@@ -46,8 +46,16 @@ public sealed class NesConsole
         ClockPpuAndDispatchNmi();
         ClockPpuAndDispatchNmi();
 
-        Cpu.Clock();
+        if (Bus.ConsumeDmcCpuStallCycle())
+        {
+            Cpu.HaltCycle();
+        }
+        else
+        {
+            Cpu.Clock();
+        }
         Bus.ClockCpuCycle();
+
         if (Bus.ConsumeIrq())
         {
             Cpu.Irq();

@@ -7,6 +7,7 @@ public interface IRenderer : IDisposable
 
     void DrawFrame(byte[] frameBuffer);
     void SubmitAudioSamples(float[] samples, int sampleCount);
+    void SetWindowTitle(string title);
 
     byte GetControllerState(int player);
     bool TryDequeueUiAction(out UiAction action);

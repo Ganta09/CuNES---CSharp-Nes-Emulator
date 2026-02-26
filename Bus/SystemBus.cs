@@ -45,9 +45,8 @@ public sealed class SystemBus
     {
         if (address == 0x4015)
         {
-            var value = _apu.ReadStatus(_openBus);
-            _openBus = value;
-            return value;
+            // $4015 is a special read: it should not latch/update the CPU open bus value.
+            return _apu.ReadStatus(_openBus);
         }
 
         if (_cartridge is not null && _cartridge.CpuRead(address, out var data))
@@ -152,6 +151,11 @@ public sealed class SystemBus
     public bool ConsumeIrq()
     {
         return _apu.ConsumeIrq();
+    }
+
+    public bool ConsumeDmcCpuStallCycle()
+    {
+        return _apu.ConsumeCpuStallCycle();
     }
 
     public int DrainAudioSamples(float[] destination, int maxSamples)

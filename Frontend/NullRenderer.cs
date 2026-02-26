@@ -17,6 +17,11 @@ public sealed class NullRenderer : IRenderer
         _ = sampleCount;
     }
 
+    public void SetWindowTitle(string title)
+    {
+        _ = title;
+    }
+
     public byte GetControllerState(int player)
     {
         _ = player;

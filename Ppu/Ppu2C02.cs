@@ -6,6 +6,8 @@ public sealed class Ppu2C02
 {
     public const int ScreenWidth = 256;
     public const int ScreenHeight = 240;
+    // Keep decay well below 1 second; tests only require decaying before that.
+    private const int OpenBusDecayPpuCycles = 1_000_000;
     private static readonly byte[] SystemPalette =
     {
         84,84,84, 0,30,116, 8,16,144, 48,0,136, 68,0,100, 92,0,48, 84,4,0, 60,24,0,
@@ -35,6 +37,7 @@ public sealed class Ppu2C02
     private bool _addressLatch;
     private byte _ppuDataBuffer;
     private byte _ppuOpenBus;
+    private int _ppuOpenBusAgeCycles;
     private ushort _vramAddress;
     private ushort _tempVramAddress;
     private ushort _scanlineScrollVramAddress;
@@ -43,6 +46,7 @@ public sealed class Ppu2C02
     private int _scanline;
     private int _dot;
     private bool _nmiRequested;
+    private bool _resetFlagActive;
     private int _activeSpriteCount;
     private int _preparedSpriteScanline = -1;
 
@@ -84,6 +88,7 @@ public sealed class Ppu2C02
         _addressLatch = false;
         _ppuDataBuffer = 0;
         _ppuOpenBus = 0;
+        _ppuOpenBusAgeCycles = OpenBusDecayPpuCycles;
         _vramAddress = 0;
         _tempVramAddress = 0;
         _scanlineScrollVramAddress = 0;
@@ -91,6 +96,7 @@ public sealed class Ppu2C02
         _scanline = 0;
         _dot = 0;
         _nmiRequested = false;
+        _resetFlagActive = true;
         _activeSpriteCount = 0;
         _preparedSpriteScanline = -1;
         Cycles = 0;
@@ -100,6 +106,14 @@ public sealed class Ppu2C02
     public void Clock()
     {
         Cycles++;
+        if (_ppuOpenBusAgeCycles < OpenBusDecayPpuCycles)
+        {
+            _ppuOpenBusAgeCycles++;
+            if (_ppuOpenBusAgeCycles >= OpenBusDecayPpuCycles)
+            {
+                _ppuOpenBus = 0;
+            }
+        }
 
         if (_dot == 0)
         {
@@ -143,7 +157,7 @@ public sealed class Ppu2C02
         if (_scanline == 261 && _dot == 1)
         {
             _status &= 0x1F;
-            UpdateSpriteOverflowFlag((_control & 0x20) != 0 ? 16 : 8);
+            _resetFlagActive = false;
         }
     }
 
@@ -157,12 +171,18 @@ public sealed class Ppu2C02
             _ => _ppuOpenBus
         };
 
-        _ppuOpenBus = value;
+        LatchOpenBus(value);
         return value;
     }
 
     public void CpuWrite(ushort registerAddress, byte data)
     {
+        if (_resetFlagActive && (registerAddress is 0x0000 or 0x0001 or 0x0005 or 0x0006))
+        {
+            LatchOpenBus(data);
+            return;
+        }
+
         switch (registerAddress)
         {
             case 0x0000:
@@ -214,7 +234,7 @@ public sealed class Ppu2C02
                 break;
         }
 
-        _ppuOpenBus = data;
+        LatchOpenBus(data);
     }
 
     public void WriteOamByte(byte value)
@@ -248,12 +268,13 @@ public sealed class Ppu2C02
         }
         else
         {
-            data = value;
+            // Palette RAM is 6-bit; top 2 bits come from PPU open bus.
+            data = (byte)((value & 0x3F) | (_ppuOpenBus & 0xC0));
             _ppuDataBuffer = ReadPpuMemory((ushort)(_vramAddress - 0x1000));
         }
 
         IncrementVramAddress();
-        _ppuOpenBus = data;
+        LatchOpenBus(data);
         return data;
     }
 
@@ -309,7 +330,7 @@ public sealed class Ppu2C02
         }
 
         var paletteAddress = NormalizePaletteAddress(address);
-        _paletteTable[paletteAddress] = data;
+        _paletteTable[paletteAddress] = (byte)(data & 0x3F);
     }
 
     private int MapNametableAddress(ushort address)
@@ -349,27 +370,32 @@ public sealed class Ppu2C02
         var showBgLeft = (_mask & 0x02) != 0;
         var showSpritesLeft = (_mask & 0x04) != 0;
 
+        var bgPipelineEnabled = backgroundEnabled || spritesEnabled;
         var bgOpaque = false;
         var bgColor = ReadPaletteMemory(0x3F00);
-        if (backgroundEnabled && (x >= 8 || showBgLeft))
+        if (bgPipelineEnabled)
         {
             bgColor = GetBackgroundPixelColor(x, y, out bgOpaque);
         }
 
-        _backgroundOpaque[y * ScreenWidth + x] = (byte)(bgOpaque ? 1 : 0);
+        var bgVisible = backgroundEnabled && (x >= 8 || showBgLeft);
+        var spritesVisible = spritesEnabled && (x >= 8 || showSpritesLeft);
+        var bgHitVisible = backgroundEnabled && spritesEnabled && (x >= 8 || (showBgLeft && showSpritesLeft));
 
-        var finalColor = bgColor;
-        if (spritesEnabled && (x >= 8 || showSpritesLeft))
+        _backgroundOpaque[y * ScreenWidth + x] = (byte)((bgVisible && bgOpaque) ? 1 : 0);
+
+        var finalColor = bgVisible ? bgColor : ReadPaletteMemory(0x3F00);
+        if (spritesVisible)
         {
             var hasSprite = TryGetSpritePixel(x, y, out var spriteColor, out var behindBackground, out var isSpriteZero);
             if (hasSprite)
             {
-                if (isSpriteZero && bgOpaque && x < 255)
+                if (isSpriteZero && bgHitVisible && bgOpaque && x < 255)
                 {
                     _status |= 0x40;
                 }
 
-                if (!behindBackground || !bgOpaque)
+                if (!behindBackground || !bgVisible || !bgOpaque)
                 {
                     finalColor = spriteColor;
                 }
@@ -512,6 +538,11 @@ public sealed class Ppu2C02
         _activeSpriteCount = 0;
 
         var spriteHeight = (_control & 0x20) != 0 ? 16 : 8;
+        if (EvaluateSpriteOverflowForScanline(scanline, spriteHeight))
+        {
+            _status |= 0x20;
+        }
+
         for (var spriteIndex = 0; spriteIndex < 64; spriteIndex++)
         {
             var spriteY = _oam[spriteIndex * 4] + 1;
@@ -528,25 +559,39 @@ public sealed class Ppu2C02
         }
     }
 
-    private void UpdateSpriteOverflowFlag(int spriteHeight)
+    private bool EvaluateSpriteOverflowForScanline(int scanline, int spriteHeight)
     {
-        for (var scanline = 0; scanline < ScreenHeight; scanline++)
+        // Emulate the 2C02 sprite-overflow bug by tracking OAM address progression
+        // after secondary OAM becomes full. This reproduces diagonal checks and the
+        // key m==3 out-of-range case where address advances by +5.
+        var inRangeCount = 0;
+        var oamAddress = 0;
+        while ((oamAddress >> 2) < 64)
         {
-            var count = 0;
-            for (var i = 0; i < 64; i++)
+            var y = _oam[oamAddress & 0xFF] + 1;
+            var inRange = scanline >= y && scanline < y + spriteHeight;
+
+            if (inRangeCount < 8)
             {
-                var spriteY = _oam[i * 4] + 1;
-                if (scanline >= spriteY && scanline < spriteY + spriteHeight)
+                if (inRange)
                 {
-                    count++;
-                    if (count > 8)
-                    {
-                        _status |= 0x20;
-                        return;
-                    }
+                    inRangeCount++;
                 }
+
+                oamAddress += 4;
+                continue;
             }
+
+            if (inRange)
+            {
+                return true;
+            }
+
+            var m = oamAddress & 0x03;
+            oamAddress += m == 3 ? 5 : 1;
         }
+
+        return false;
     }
 
     private byte ResolveBackgroundColor(int colorIndex, int paletteId)
@@ -577,5 +622,11 @@ public sealed class Ppu2C02
         FrameBuffer[fb + 1] = SystemPalette[idx + 1];
         FrameBuffer[fb + 2] = SystemPalette[idx + 2];
         FrameBuffer[fb + 3] = 255;
+    }
+
+    private void LatchOpenBus(byte value)
+    {
+        _ppuOpenBus = value;
+        _ppuOpenBusAgeCycles = 0;
     }
 }

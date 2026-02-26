@@ -503,7 +503,10 @@ public static class CpuSelfTests
         RunCpuCycles(cpu, 2);
         AssertEquals((ushort)0x0001, cpu.ProgramCounter, "PC after CLI");
 
-        // IRQ should now be serviced before next opcode fetch.
+        // On 6502, IRQ recognition is inhibited for one following instruction.
+        RunCpuCycles(cpu, 2); // NOP
+        AssertEquals((ushort)0x0002, cpu.ProgramCounter, "PC after one instruction post-CLI");
+
         RunCpuCycles(cpu, 7);
         AssertEquals((byte)0xFA, cpu.StackPointer, "SP after IRQ push");
         AssertTrue(HasFlag(cpu.Status, FlagInterruptDisable), "Interrupt disable should be set by IRQ");

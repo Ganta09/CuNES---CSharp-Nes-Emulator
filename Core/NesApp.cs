@@ -71,10 +71,15 @@ public sealed class NesApp
     {
         Console.WriteLine($"CPU: {_config.CpuFrequencyHz} Hz | Target: {_config.TargetFps} FPS");
         renderer.SetRomLoaded(_console.Cartridge is not null);
+        renderer.SetWindowTitle(_config.WindowTitle);
 
         var cyclesPerFrame = _config.CpuFrequencyHz / _config.TargetFps;
         var frame = 0;
         var lastRenderedPpuFrame = _console.Ppu.FrameCount;
+        var fpsWindowStartSeconds = 0.0;
+        var fpsWindowFrames = 0;
+        var fpsWindowInitialized = false;
+        var smoothedFps = (double)_config.TargetFps;
 
         while (!renderer.ShouldClose)
         {
@@ -110,6 +115,9 @@ public sealed class NesApp
                 _timingStopwatch.Restart();
                 _lastTimestampSeconds = _timingStopwatch.Elapsed.TotalSeconds;
                 _cycleAccumulator = 0.0;
+                fpsWindowStartSeconds = _lastTimestampSeconds;
+                fpsWindowFrames = 0;
+                fpsWindowInitialized = true;
             }
 
             var nowSeconds = _timingStopwatch.Elapsed.TotalSeconds;
@@ -151,6 +159,19 @@ public sealed class NesApp
                 renderer.DrawFrame(_console.Ppu.FrameBuffer);
                 lastRenderedPpuFrame = _console.Ppu.FrameCount;
                 frame++;
+                fpsWindowFrames++;
+                if (fpsWindowInitialized)
+                {
+                    var elapsed = nowSeconds - fpsWindowStartSeconds;
+                    if (elapsed >= 1.0)
+                    {
+                        var fps = fpsWindowFrames / elapsed;
+                        smoothedFps = (smoothedFps * 0.7) + (fps * 0.3);
+                        renderer.SetWindowTitle($"{_config.WindowTitle} | {smoothedFps:F1} FPS");
+                        fpsWindowStartSeconds = nowSeconds;
+                        fpsWindowFrames = 0;
+                    }
+                }
             }
         }
     }

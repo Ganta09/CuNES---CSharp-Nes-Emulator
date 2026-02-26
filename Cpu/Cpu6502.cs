@@ -55,6 +55,18 @@ public sealed class Cpu6502
     private byte _cyclesRemaining;
     private bool _nmiPending;
     private bool _irqPending;
+    private bool _irqPendingLatched;
+    private bool _irqPolledThisInstruction;
+    private bool _shMicroActive;
+    private byte _shMicroOpcode;
+    private int _shMicroStep;
+    private byte _shZeroPagePointer;
+    private ushort _shBaseAddress;
+    private ushort _shEffectiveAddress;
+    private byte _shRawRegisterValue;
+    private byte _shHighMask;
+    private byte _shWriteValue;
+    private bool _shRdyLowTwoCyclesBeforeWrite;
     private Instruction _currentInstruction;
 
     public byte A { get; private set; }
@@ -99,11 +111,30 @@ public sealed class Cpu6502
         _cyclesRemaining = 8;
         _nmiPending = false;
         _irqPending = false;
+        _irqPendingLatched = false;
+        _irqPolledThisInstruction = false;
+        _shMicroActive = false;
+        _shMicroOpcode = 0;
+        _shMicroStep = 0;
+        _shZeroPagePointer = 0;
+        _shBaseAddress = 0;
+        _shEffectiveAddress = 0;
+        _shRawRegisterValue = 0;
+        _shHighMask = 0;
+        _shWriteValue = 0;
+        _shRdyLowTwoCyclesBeforeWrite = false;
         Cycles = 0;
     }
 
     public void Clock()
     {
+        if (_shMicroActive)
+        {
+            RunShMicroStep();
+            Cycles++;
+            return;
+        }
+
         if (_cyclesRemaining == 0)
         {
             if (_nmiPending)
@@ -116,9 +147,10 @@ public sealed class Cpu6502
                 return;
             }
 
-            if (_irqPending && !GetFlag(StatusFlag.InterruptDisable))
+            if (_irqPendingLatched)
             {
                 HandleIrq();
+                _irqPendingLatched = false;
                 _irqPending = false;
                 _cyclesRemaining = 7;
                 _cyclesRemaining--;
@@ -128,17 +160,49 @@ public sealed class Cpu6502
 
             _opcode = Read(ProgramCounter++);
             _currentInstruction = _lookup[_opcode];
+            _irqPolledThisInstruction = false;
+
+            if (IsShMicroOpcode(_opcode))
+            {
+                StartShMicrocode(_opcode);
+                Cycles++;
+                return;
+            }
 
             _cyclesRemaining = _currentInstruction.Cycles;
 
             var additionalCycleFromAddressMode = _currentInstruction.AddressMode();
             var additionalCycleFromOperation = _currentInstruction.Operate();
 
+            if (!_irqPolledThisInstruction && _opcode != 0x00)
+            {
+                PollIrq();
+            }
+
             _cyclesRemaining += (byte)(additionalCycleFromAddressMode & additionalCycleFromOperation);
             SetFlag(StatusFlag.Unused, true);
         }
 
         _cyclesRemaining--;
+        Cycles++;
+    }
+
+    public void HaltCycle()
+    {
+        if (_shMicroActive)
+        {
+            if (IsShTwoCyclesBeforeWriteStep())
+            {
+                _shRdyLowTwoCyclesBeforeWrite = true;
+            }
+
+            // RDY does not hold writes; commit the SH* write cycle if we are on it.
+            if (IsShWriteStep())
+            {
+                RunShMicroStep();
+            }
+        }
+
         Cycles++;
     }
 
@@ -165,6 +229,15 @@ public sealed class Cpu6502
     public void Irq()
     {
         _irqPending = true;
+    }
+
+    private void PollIrq()
+    {
+        _irqPolledThisInstruction = true;
+        if (_irqPending && !GetFlag(StatusFlag.InterruptDisable))
+        {
+            _irqPendingLatched = true;
+        }
     }
 
     private void BuildInstructionTable()
@@ -381,6 +454,83 @@ public sealed class Cpu6502
         SetInstruction(0x38, "SEC", SEC, IMP, AddressModeKind.Imp, 2);
         SetInstruction(0xF8, "SED", SED, IMP, AddressModeKind.Imp, 2);
         SetInstruction(0x78, "SEI", SEI, IMP, AddressModeKind.Imp, 2);
+
+        // Unofficial opcodes (NMOS 6502 / NES-compatible behavior)
+        SetInstruction(0x07, "SLO", SLO, ZP0, AddressModeKind.Zp0, 5);
+        SetInstruction(0x17, "SLO", SLO, ZPX, AddressModeKind.Zpx, 6);
+        SetInstruction(0x0F, "SLO", SLO, ABS, AddressModeKind.Abs, 6);
+        SetInstruction(0x1F, "SLO", SLO, ABX, AddressModeKind.Abx, 7);
+        SetInstruction(0x1B, "SLO", SLO, ABY, AddressModeKind.Aby, 7);
+        SetInstruction(0x03, "SLO", SLO, IZX, AddressModeKind.Izx, 8);
+        SetInstruction(0x13, "SLO", SLO, IZY, AddressModeKind.Izy, 8);
+
+        SetInstruction(0x27, "RLA", RLA, ZP0, AddressModeKind.Zp0, 5);
+        SetInstruction(0x37, "RLA", RLA, ZPX, AddressModeKind.Zpx, 6);
+        SetInstruction(0x2F, "RLA", RLA, ABS, AddressModeKind.Abs, 6);
+        SetInstruction(0x3F, "RLA", RLA, ABX, AddressModeKind.Abx, 7);
+        SetInstruction(0x3B, "RLA", RLA, ABY, AddressModeKind.Aby, 7);
+        SetInstruction(0x23, "RLA", RLA, IZX, AddressModeKind.Izx, 8);
+        SetInstruction(0x33, "RLA", RLA, IZY, AddressModeKind.Izy, 8);
+
+        SetInstruction(0x47, "SRE", SRE, ZP0, AddressModeKind.Zp0, 5);
+        SetInstruction(0x57, "SRE", SRE, ZPX, AddressModeKind.Zpx, 6);
+        SetInstruction(0x4F, "SRE", SRE, ABS, AddressModeKind.Abs, 6);
+        SetInstruction(0x5F, "SRE", SRE, ABX, AddressModeKind.Abx, 7);
+        SetInstruction(0x5B, "SRE", SRE, ABY, AddressModeKind.Aby, 7);
+        SetInstruction(0x43, "SRE", SRE, IZX, AddressModeKind.Izx, 8);
+        SetInstruction(0x53, "SRE", SRE, IZY, AddressModeKind.Izy, 8);
+
+        SetInstruction(0x67, "RRA", RRA, ZP0, AddressModeKind.Zp0, 5);
+        SetInstruction(0x77, "RRA", RRA, ZPX, AddressModeKind.Zpx, 6);
+        SetInstruction(0x6F, "RRA", RRA, ABS, AddressModeKind.Abs, 6);
+        SetInstruction(0x7F, "RRA", RRA, ABX, AddressModeKind.Abx, 7);
+        SetInstruction(0x7B, "RRA", RRA, ABY, AddressModeKind.Aby, 7);
+        SetInstruction(0x63, "RRA", RRA, IZX, AddressModeKind.Izx, 8);
+        SetInstruction(0x73, "RRA", RRA, IZY, AddressModeKind.Izy, 8);
+
+        SetInstruction(0x87, "SAX", SAX, ZP0, AddressModeKind.Zp0, 3);
+        SetInstruction(0x97, "SAX", SAX, ZPY, AddressModeKind.Zpy, 4);
+        SetInstruction(0x8F, "SAX", SAX, ABS, AddressModeKind.Abs, 4);
+        SetInstruction(0x83, "SAX", SAX, IZX, AddressModeKind.Izx, 6);
+
+        SetInstruction(0xA7, "LAX", LAX, ZP0, AddressModeKind.Zp0, 3);
+        SetInstruction(0xB7, "LAX", LAX, ZPY, AddressModeKind.Zpy, 4);
+        SetInstruction(0xAF, "LAX", LAX, ABS, AddressModeKind.Abs, 4);
+        SetInstruction(0xBF, "LAX", LAX, ABY, AddressModeKind.Aby, 4);
+        SetInstruction(0xA3, "LAX", LAX, IZX, AddressModeKind.Izx, 6);
+        SetInstruction(0xB3, "LAX", LAX, IZY, AddressModeKind.Izy, 5);
+
+        SetInstruction(0xC7, "DCP", DCP, ZP0, AddressModeKind.Zp0, 5);
+        SetInstruction(0xD7, "DCP", DCP, ZPX, AddressModeKind.Zpx, 6);
+        SetInstruction(0xCF, "DCP", DCP, ABS, AddressModeKind.Abs, 6);
+        SetInstruction(0xDF, "DCP", DCP, ABX, AddressModeKind.Abx, 7);
+        SetInstruction(0xDB, "DCP", DCP, ABY, AddressModeKind.Aby, 7);
+        SetInstruction(0xC3, "DCP", DCP, IZX, AddressModeKind.Izx, 8);
+        SetInstruction(0xD3, "DCP", DCP, IZY, AddressModeKind.Izy, 8);
+
+        SetInstruction(0xE7, "ISC", ISC, ZP0, AddressModeKind.Zp0, 5);
+        SetInstruction(0xF7, "ISC", ISC, ZPX, AddressModeKind.Zpx, 6);
+        SetInstruction(0xEF, "ISC", ISC, ABS, AddressModeKind.Abs, 6);
+        SetInstruction(0xFF, "ISC", ISC, ABX, AddressModeKind.Abx, 7);
+        SetInstruction(0xFB, "ISC", ISC, ABY, AddressModeKind.Aby, 7);
+        SetInstruction(0xE3, "ISC", ISC, IZX, AddressModeKind.Izx, 8);
+        SetInstruction(0xF3, "ISC", ISC, IZY, AddressModeKind.Izy, 8);
+
+        SetInstruction(0x0B, "ANC", ANC, IMM, AddressModeKind.Imm, 2);
+        SetInstruction(0x2B, "ANC", ANC, IMM, AddressModeKind.Imm, 2);
+        SetInstruction(0x4B, "ASR", ASR, IMM, AddressModeKind.Imm, 2);
+        SetInstruction(0x6B, "ARR", ARR, IMM, AddressModeKind.Imm, 2);
+        SetInstruction(0x8B, "ANE", ANE, IMM, AddressModeKind.Imm, 2);
+        SetInstruction(0xAB, "LXA", LXA, IMM, AddressModeKind.Imm, 2);
+        SetInstruction(0xCB, "AXS", AXS, IMM, AddressModeKind.Imm, 2);
+        SetInstruction(0xEB, "SBC", SBC, IMM, AddressModeKind.Imm, 2);
+
+        SetInstruction(0x9F, "SHA", SHA, ABY, AddressModeKind.Aby, 5);
+        SetInstruction(0x93, "SHA", SHA, IZY, AddressModeKind.Izy, 6);
+        SetInstruction(0x9E, "SHX", SHX, ABY, AddressModeKind.Aby, 5);
+        SetInstruction(0x9C, "SHY", SHY, ABX, AddressModeKind.Abx, 5);
+        SetInstruction(0x9B, "SHS", SHS, ABY, AddressModeKind.Aby, 5);
+        SetInstruction(0xBB, "LAE", LAE, ABY, AddressModeKind.Aby, 4);
     }
 
     private void SetInstruction(byte opcode, string name, OperationHandler operation, AddressModeHandler addressMode, AddressModeKind addressModeKind, byte cycles)
@@ -428,6 +578,175 @@ public sealed class Cpu6502
         SetFlag(StatusFlag.Negative, (value & 0x80) != 0);
     }
 
+    private void ExecuteAdc(byte value)
+    {
+        var temp = (ushort)(A + value + (GetFlag(StatusFlag.Carry) ? 1 : 0));
+
+        SetFlag(StatusFlag.Carry, temp > 0xFF);
+        SetFlag(StatusFlag.Zero, (temp & 0x00FF) == 0);
+        SetFlag(StatusFlag.Overflow, (~(A ^ value) & (A ^ temp) & 0x80) != 0);
+        SetFlag(StatusFlag.Negative, (temp & 0x80) != 0);
+
+        A = (byte)(temp & 0x00FF);
+    }
+
+    private void ExecuteSbc(byte value)
+    {
+        var inverted = (byte)(value ^ 0xFF);
+        var temp = (ushort)(A + inverted + (GetFlag(StatusFlag.Carry) ? 1 : 0));
+
+        SetFlag(StatusFlag.Carry, (temp & 0xFF00) != 0);
+        SetFlag(StatusFlag.Zero, (temp & 0x00FF) == 0);
+        SetFlag(StatusFlag.Overflow, ((temp ^ A) & (temp ^ inverted) & 0x80) != 0);
+        SetFlag(StatusFlag.Negative, (temp & 0x80) != 0);
+
+        A = (byte)(temp & 0x00FF);
+    }
+
+    private void DoIndexedStoreDummyRead()
+    {
+        if (_currentInstruction.AddressModeKind is AddressModeKind.Abx or AddressModeKind.Aby or AddressModeKind.Izy)
+        {
+            _ = Read((ushort)((_addressAbsoluteBase & 0xFF00) | (_addressAbsolute & 0x00FF)));
+        }
+    }
+
+    private byte GetStoreHighMask()
+    {
+        // SH* family uses the high byte from the pre-carry base address.
+        return (byte)(((_shBaseAddress >> 8) + 1) & 0xFF);
+    }
+
+    private static bool IsShMicroOpcode(byte opcode)
+    {
+        return opcode is 0x93 or 0x9F or 0x9B or 0x9C or 0x9E;
+    }
+
+    private bool IsShWriteStep()
+    {
+        return _shMicroOpcode == 0x93 ? _shMicroStep == 5 : _shMicroStep == 4;
+    }
+
+    private bool IsShTwoCyclesBeforeWriteStep()
+    {
+        return _shMicroOpcode == 0x93 ? _shMicroStep == 3 : _shMicroStep == 2;
+    }
+
+    private void StartShMicrocode(byte opcode)
+    {
+        _shMicroActive = true;
+        _shMicroOpcode = opcode;
+        _shMicroStep = 1;
+        _shZeroPagePointer = 0;
+        _shBaseAddress = 0;
+        _shEffectiveAddress = 0;
+        _shRawRegisterValue = 0;
+        _shHighMask = 0;
+        _shWriteValue = 0;
+        _shRdyLowTwoCyclesBeforeWrite = false;
+    }
+
+    private ushort GetShStoreAddress()
+    {
+        var pageCrossed = (_shEffectiveAddress & 0xFF00) != (_shBaseAddress & 0xFF00);
+        if (!pageCrossed)
+        {
+            return _shEffectiveAddress;
+        }
+
+        // SH* unstable stores can corrupt the write-address high byte on page-cross:
+        // ABH <- ABH & mask.
+        var effectiveHigh = (byte)(_shEffectiveAddress >> 8);
+        var baseHigh = (byte)(_shBaseAddress >> 8);
+        var sourceHigh = _shRdyLowTwoCyclesBeforeWrite ? baseHigh : effectiveHigh;
+        var high = (byte)(sourceHigh & _shRawRegisterValue);
+        return (ushort)((_shEffectiveAddress & 0x00FF) | (high << 8));
+    }
+
+    private void ComputeShRawAndValue()
+    {
+        _shRawRegisterValue = _shMicroOpcode switch
+        {
+            0x9C => Y,
+            0x9E => X,
+            _ => (byte)(A & X)
+        };
+
+        _shHighMask = GetStoreHighMask();
+        _shWriteValue = (byte)(_shRawRegisterValue & _shHighMask);
+        if (_shMicroOpcode == 0x9B)
+        {
+            StackPointer = (byte)(A & X);
+        }
+    }
+
+    private void RunShMicroStep()
+    {
+        if (_shMicroOpcode == 0x93)
+        {
+            switch (_shMicroStep)
+            {
+                case 1:
+                    _shZeroPagePointer = Read(ProgramCounter++);
+                    break;
+                case 2:
+                {
+                    var low = Read(_shZeroPagePointer);
+                    _shBaseAddress = (ushort)((_shBaseAddress & 0xFF00) | low);
+                    break;
+                }
+                case 3:
+                {
+                    var high = Read((byte)(_shZeroPagePointer + 1));
+                    _shBaseAddress = (ushort)((high << 8) | (_shBaseAddress & 0x00FF));
+                    _shEffectiveAddress = (ushort)(_shBaseAddress + Y);
+                    ComputeShRawAndValue();
+                    break;
+                }
+                case 4:
+                    _ = Read((ushort)((_shBaseAddress & 0xFF00) | (_shEffectiveAddress & 0x00FF)));
+                    break;
+                case 5:
+                    Write(GetShStoreAddress(), _shWriteValue);
+                    _shMicroActive = false;
+                    break;
+            }
+        }
+        else
+        {
+            var index = _shMicroOpcode == 0x9C ? X : Y;
+            switch (_shMicroStep)
+            {
+                case 1:
+                {
+                    var low = Read(ProgramCounter++);
+                    _shBaseAddress = (ushort)((_shBaseAddress & 0xFF00) | low);
+                    break;
+                }
+                case 2:
+                {
+                    var high = Read(ProgramCounter++);
+                    _shBaseAddress = (ushort)((high << 8) | (_shBaseAddress & 0x00FF));
+                    _shEffectiveAddress = (ushort)(_shBaseAddress + index);
+                    ComputeShRawAndValue();
+                    break;
+                }
+                case 3:
+                    _ = Read((ushort)((_shBaseAddress & 0xFF00) | (_shEffectiveAddress & 0x00FF)));
+                    break;
+                case 4:
+                    Write(GetShStoreAddress(), _shWriteValue);
+                    _shMicroActive = false;
+                    break;
+            }
+        }
+
+        if (_shMicroActive)
+        {
+            _shMicroStep++;
+        }
+    }
+
     private void Push(byte value)
     {
         Write((ushort)(0x0100 + StackPointer), value);
@@ -445,10 +764,9 @@ public sealed class Cpu6502
         Push((byte)((ProgramCounter >> 8) & 0x00FF));
         Push((byte)(ProgramCounter & 0x00FF));
 
-        SetFlag(StatusFlag.Break, false);
-        SetFlag(StatusFlag.Unused, true);
+        var statusToPush = (byte)((Status & ~(byte)StatusFlag.Break) | (byte)StatusFlag.Unused);
+        Push(statusToPush);
         SetFlag(StatusFlag.InterruptDisable, true);
-        Push(Status);
 
         var low = Read(0xFFFA);
         var high = Read(0xFFFB);
@@ -460,10 +778,9 @@ public sealed class Cpu6502
         Push((byte)((ProgramCounter >> 8) & 0x00FF));
         Push((byte)(ProgramCounter & 0x00FF));
 
-        SetFlag(StatusFlag.Break, false);
-        SetFlag(StatusFlag.Unused, true);
+        var statusToPush = (byte)((Status & ~(byte)StatusFlag.Break) | (byte)StatusFlag.Unused);
+        Push(statusToPush);
         SetFlag(StatusFlag.InterruptDisable, true);
-        Push(Status);
 
         var low = Read(0xFFFE);
         var high = Read(0xFFFF);
@@ -472,6 +789,8 @@ public sealed class Cpu6502
 
     private void BranchIf(bool condition)
     {
+        PollIrq(); // branch poll before cycle 2
+
         if (!condition)
         {
             return;
@@ -482,6 +801,7 @@ public sealed class Cpu6502
         if ((target & 0xFF00) != (ProgramCounter & 0xFF00))
         {
             _cyclesRemaining++;
+            PollIrq(); // taken + page cross: poll before cycle 4
         }
 
         ProgramCounter = target;
@@ -644,29 +964,13 @@ public sealed class Cpu6502
 
     private byte ADC()
     {
-        var value = Fetch();
-        var temp = (ushort)(A + value + (GetFlag(StatusFlag.Carry) ? 1 : 0));
-
-        SetFlag(StatusFlag.Carry, temp > 0xFF);
-        SetFlag(StatusFlag.Zero, (temp & 0x00FF) == 0);
-        SetFlag(StatusFlag.Overflow, (~(A ^ value) & (A ^ temp) & 0x80) != 0);
-        SetFlag(StatusFlag.Negative, (temp & 0x80) != 0);
-
-        A = (byte)(temp & 0x00FF);
+        ExecuteAdc(Fetch());
         return 1;
     }
 
     private byte SBC()
     {
-        var value = (byte)(Fetch() ^ 0xFF);
-        var temp = (ushort)(A + value + (GetFlag(StatusFlag.Carry) ? 1 : 0));
-
-        SetFlag(StatusFlag.Carry, (temp & 0xFF00) != 0);
-        SetFlag(StatusFlag.Zero, (temp & 0x00FF) == 0);
-        SetFlag(StatusFlag.Overflow, ((temp ^ A) & (temp ^ value) & 0x80) != 0);
-        SetFlag(StatusFlag.Negative, (temp & 0x80) != 0);
-
-        A = (byte)(temp & 0x00FF);
+        ExecuteSbc(Fetch());
         return 1;
     }
 
@@ -714,11 +1018,7 @@ public sealed class Cpu6502
 
     private byte STA()
     {
-        if (_currentInstruction.AddressModeKind is AddressModeKind.Abx or AddressModeKind.Aby or AddressModeKind.Izy)
-        {
-            _ = Read((ushort)((_addressAbsoluteBase & 0xFF00) | (_addressAbsolute & 0x00FF)));
-        }
-
+        DoIndexedStoreDummyRead();
         Write(_addressAbsolute, A);
         return 0;
     }
@@ -797,6 +1097,7 @@ public sealed class Cpu6502
 
     private byte PLP()
     {
+        PollIrq(); // PLP polls before cycle 2 (before pulling P)
         Status = Pop();
         SetFlag(StatusFlag.Unused, true);
         return 0;
@@ -885,6 +1186,176 @@ public sealed class Cpu6502
         }
 
         return 0;
+    }
+
+    private byte SLO()
+    {
+        var oldValue = Fetch();
+        var result = (byte)(oldValue << 1);
+        SetFlag(StatusFlag.Carry, (oldValue & 0x80) != 0);
+        Write(_addressAbsolute, oldValue);
+        Write(_addressAbsolute, result);
+        A |= result;
+        SetZeroAndNegativeFlags(A);
+        return 0;
+    }
+
+    private byte RLA()
+    {
+        var oldValue = Fetch();
+        var result = (byte)((oldValue << 1) | (GetFlag(StatusFlag.Carry) ? 1 : 0));
+        SetFlag(StatusFlag.Carry, (oldValue & 0x80) != 0);
+        Write(_addressAbsolute, oldValue);
+        Write(_addressAbsolute, result);
+        A &= result;
+        SetZeroAndNegativeFlags(A);
+        return 0;
+    }
+
+    private byte SRE()
+    {
+        var oldValue = Fetch();
+        var result = (byte)(oldValue >> 1);
+        SetFlag(StatusFlag.Carry, (oldValue & 0x01) != 0);
+        Write(_addressAbsolute, oldValue);
+        Write(_addressAbsolute, result);
+        A ^= result;
+        SetZeroAndNegativeFlags(A);
+        return 0;
+    }
+
+    private byte RRA()
+    {
+        var oldValue = Fetch();
+        var result = (byte)(((GetFlag(StatusFlag.Carry) ? 1 : 0) << 7) | (oldValue >> 1));
+        SetFlag(StatusFlag.Carry, (oldValue & 0x01) != 0);
+        Write(_addressAbsolute, oldValue);
+        Write(_addressAbsolute, result);
+        ExecuteAdc(result);
+        return 0;
+    }
+
+    private byte SAX()
+    {
+        Write(_addressAbsolute, (byte)(A & X));
+        return 0;
+    }
+
+    private byte LAX()
+    {
+        var value = Fetch();
+        A = value;
+        X = value;
+        SetZeroAndNegativeFlags(value);
+        return 1;
+    }
+
+    private byte DCP()
+    {
+        var oldValue = Fetch();
+        var newValue = (byte)(oldValue - 1);
+        Write(_addressAbsolute, oldValue);
+        Write(_addressAbsolute, newValue);
+
+        var temp = (ushort)(A - newValue);
+        SetFlag(StatusFlag.Carry, A >= newValue);
+        SetFlag(StatusFlag.Zero, (temp & 0x00FF) == 0);
+        SetFlag(StatusFlag.Negative, (temp & 0x0080) != 0);
+        return 0;
+    }
+
+    private byte ISC()
+    {
+        var oldValue = Fetch();
+        var newValue = (byte)(oldValue + 1);
+        Write(_addressAbsolute, oldValue);
+        Write(_addressAbsolute, newValue);
+        ExecuteSbc(newValue);
+        return 0;
+    }
+
+    private byte ANC()
+    {
+        A &= Fetch();
+        SetZeroAndNegativeFlags(A);
+        SetFlag(StatusFlag.Carry, (A & 0x80) != 0);
+        return 0;
+    }
+
+    private byte ASR()
+    {
+        var value = (byte)(A & Fetch());
+        SetFlag(StatusFlag.Carry, (value & 0x01) != 0);
+        A = (byte)(value >> 1);
+        SetZeroAndNegativeFlags(A);
+        return 0;
+    }
+
+    private byte ARR()
+    {
+        var value = (byte)(A & Fetch());
+        var result = (byte)(((GetFlag(StatusFlag.Carry) ? 1 : 0) << 7) | (value >> 1));
+        A = result;
+        SetZeroAndNegativeFlags(A);
+        SetFlag(StatusFlag.Carry, (A & 0x40) != 0);
+        SetFlag(StatusFlag.Overflow, ((A >> 6) & 0x01) != ((A >> 5) & 0x01));
+        return 0;
+    }
+
+    private byte ANE()
+    {
+        A = (byte)(A & X & Fetch());
+        SetZeroAndNegativeFlags(A);
+        return 0;
+    }
+
+    private byte LXA()
+    {
+        A = (byte)(A & Fetch());
+        X = A;
+        SetZeroAndNegativeFlags(A);
+        return 0;
+    }
+
+    private byte AXS()
+    {
+        var value = Fetch();
+        var anded = (byte)(A & X);
+        var result = (byte)(anded - value);
+        SetFlag(StatusFlag.Carry, anded >= value);
+        X = result;
+        SetZeroAndNegativeFlags(X);
+        return 0;
+    }
+
+    private byte SHA()
+    {
+        return 0;
+    }
+
+    private byte SHX()
+    {
+        return 0;
+    }
+
+    private byte SHY()
+    {
+        return 0;
+    }
+
+    private byte SHS()
+    {
+        return 0;
+    }
+
+    private byte LAE()
+    {
+        var value = (byte)(Fetch() & StackPointer);
+        A = value;
+        X = value;
+        StackPointer = value;
+        SetZeroAndNegativeFlags(value);
+        return 1;
     }
 
     private byte INC()
@@ -1080,6 +1551,7 @@ public sealed class Cpu6502
 
     private byte CLI()
     {
+        PollIrq(); // CLI polls before cycle 2 (before clearing I)
         SetFlag(StatusFlag.InterruptDisable, false);
         return 0;
     }
@@ -1104,6 +1576,7 @@ public sealed class Cpu6502
 
     private byte SEI()
     {
+        PollIrq(); // SEI polls before cycle 2 (before setting I)
         SetFlag(StatusFlag.InterruptDisable, true);
         return 0;
     }
@@ -1142,3 +1615,5 @@ public sealed class Cpu6502
         return 0;
     }
 }
+
+
