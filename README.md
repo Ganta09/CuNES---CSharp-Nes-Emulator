@@ -1,13 +1,12 @@
-<p align="center">
-  <img src="docs/images/megaman2.png" alt="Mega Man 2" width="32%" />
-  <img src="docs/images/menu.png" alt="Menu" width="32%" />
-  <img src="docs/images/mario.png" alt="Super Mario Bros" width="32%" />
-</p>
-
 # CuNES
 
 CuNES is a work-in-progress NES emulator written in C# with a Raylib frontend.  
 It currently supports loading `.nes` ROMs, rendering video, handling controller input, and generating APU audio (funky but working).
+
+## Download Release
+
+Download the latest Windows release here:  
+https://github.com/Ganta09/CuNES---CSharp-Nes-Emulator/releases
 
 ## Current Features
 
@@ -60,6 +59,10 @@ dotnet run --project CuNES.csproj -- --rom path/to/game.nes
 - Resize Window
 
 ## Screenshots / Images
+
+<p align="center">
+  <img src="docs/images/gaiden.png" alt="Ninja Gaiden" width="65%" />
+</p>
 
 
 ## Acknowledgements
