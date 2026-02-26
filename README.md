@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="docs/images/megaman2.png" alt="Mega Man 2" width="32%" />
+  <img src="docs/images/menu.png" alt="Menu" width="32%" />
+  <img src="docs/images/mario.png" alt="Super Mario Bros" width="32%" />
+</p>
+
 # CuNES
 
 CuNES is a work-in-progress NES emulator written in C# with a Raylib frontend.  
