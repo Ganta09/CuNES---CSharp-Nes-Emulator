@@ -1,0 +1,22 @@
+# Build outputs
+bin/
+obj/
+
+# IDE/user-specific
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Logs/temp
+*.log
+*.tmp
+*.cache
+
+# Test/artifact outputs
+TestResults/
+
+# Local ROM assets (do not commit)
+rom/
