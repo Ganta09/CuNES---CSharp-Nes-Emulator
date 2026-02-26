@@ -5,8 +5,7 @@ It currently supports loading `.nes` ROMs, rendering video, handling controller 
 
 ## Download Release
 
-Download the latest Windows release here:  
-https://github.com/Ganta09/CuNES---CSharp-Nes-Emulator/releases
+Download the latest Windows release from [here](https://github.com/Ganta09/CuNES---CSharp-Nes-Emulator/releases).
 
 ## Current Features
 
